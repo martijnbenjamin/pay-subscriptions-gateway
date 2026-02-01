@@ -1,0 +1,24 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+webhook-emergency*.log
+
+# Build artifacts
+*.zip
+
+# Development files
+test-*.php
+pay-debug.php
+
+# Sensitive files
+.env
+credentials.json
