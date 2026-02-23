@@ -1,159 +1,131 @@
-# PAY.nl Subscriptions Gateway voor WooCommerce
+# PAY Subscriptions Gateway voor WooCommerce
 
-## Verbeteringen in deze versie
+WooCommerce betaalgateway voor [PAY.nl](https://www.pay.nl) met ondersteuning voor automatische incasso via mandaten, webhooks en abonnementen via WooCommerce Subscriptions.
 
-### Gefixte problemen:
-1. **Namespace probleem opgelost** - Alle classes hebben nu correct de `PAY_Subscriptions` namespace
-2. **Beschadigde gateway class hersteld** - De dubbele code en syntax fouten zijn verwijderd
-3. **Complete API implementatie** - De PAY.nl REST API v2 is nu volledig geïmplementeerd
-4. **Verbeterde error handling** - Uitgebreide logging en foutafhandeling toegevoegd
-5. **Webhook verificatie** - Correcte signature verificatie geïmplementeerd
-6. **Token/mandate opslag** - Proper implementatie voor het opslaan van betaalmandaten
+Ontwikkeld door [Martijn Benjamin](https://martijnbenjamin.nl) — webdesigner en WordPress-specialist, eigenaar van [072DESIGN](https://072design.nl).
+
+---
+
+## Wat doet deze plugin?
+
+Deze plugin integreert PAY.nl als betaalmethode in WooCommerce en voegt ondersteuning toe voor:
+
+- Automatische incasso via betaalmandaten (iDEAL, SEPA Direct Debit)
+- Terugkerende betalingen via WooCommerce Subscriptions
+- Webhook-verwerking met HMAC-SHA256 verificatie
+- Opslaan van betaalmandaten als WooCommerce Payment Tokens
+- Terugbetalingen via de PAY.nl API
+- Testmodus via de PAY.nl sandbox
+
+De plugin is gebouwd voor eigen gebruik en openbaar gemaakt zodat anderen er gebruik van kunnen maken of op voort kunnen bouwen.
+
+---
+
+## Vereisten
+
+- WordPress 5.6 of hoger
+- PHP 7.4 of hoger
+- WooCommerce 6.0 of hoger
+- [WooCommerce Subscriptions](https://woocommerce.com/products/woocommerce-subscriptions/) (voor terugkerende betalingen)
+- Een actief [PAY.nl](https://www.pay.nl) account met Direct Debit ingeschakeld
+
+---
 
 ## Installatie
 
-1. Upload de plugin naar `/wp-content/plugins/pay-subscriptions-fixed/`
-2. Activeer de plugin via het WordPress admin panel
-3. Ga naar WooCommerce → Instellingen → Betalingen
-4. Activeer "PAY (Subscriptions)" gateway
-5. Configureer de instellingen
+1. Download of kloon deze repository
+2. Upload de map naar `/wp-content/plugins/pay-subscriptions/`
+3. Activeer de plugin via **WordPress → Plugins**
+4. Ga naar **WooCommerce → Instellingen → Betalingen**
+5. Activeer **PAY (Subscriptions)** en klik op **Instellingen**
+
+---
 
 ## Configuratie
 
-### Vereiste instellingen:
+### Vereiste instellingen
 
-1. **PAY API Token** (verplicht)
-   - Format: `AT-xxxx-xxxx`
-   - Te vinden in je PAY.nl account onder API tokens
+| Instelling | Formaat | Waar te vinden |
+|---|---|---|
+| PAY Token Code | `AT-xxxx-xxxx` | PAY.nl dashboard → API tokens |
+| PAY API Token | — | PAY.nl dashboard → API tokens |
+| PAY Service ID | `SL-xxxx-xxxx` | PAY.nl dashboard → Services |
 
-2. **PAY Service ID** (verplicht)
-   - Format: `SL-xxxx-xxxx`
-   - Te vinden in je PAY.nl account onder Services
+De webhook secret wordt automatisch gegenereerd bij activatie.
 
-3. **Webhook Secret**
-   - Wordt automatisch gegenereerd bij activatie
-   - Gebruik deze URL in PAY.nl: `https://jouwsite.nl/?wc-api=pay_subs_webhook`
+### API-permissies
 
-4. **Testmodus**
-   - Schakel in voor testen met de PAY.nl sandbox
-   - Gebruik test API credentials
+Zorg dat je API token de volgende permissies heeft in PAY.nl:
 
-## PAY.nl Configuratie
-
-### Webhook instellen:
-
-1. Log in op je PAY.nl account
-2. Ga naar Services → Jouw service → Webhooks
-3. Voeg nieuwe webhook toe:
-   - URL: `https://jouwsite.nl/?wc-api=pay_subs_webhook`
-   - Events: Transaction status changes, Mandate changes, Refunds
-   - Secret: Kopieer de secret uit WooCommerce settings
-
-### API Permissies:
-
-Zorg dat je API token de volgende permissies heeft:
 - Transactions: Create, Read
 - Mandates: Create, Read, Cancel
 - Refunds: Create
 - Services: Read
 
-## Debugging
+### Webhook instellen in PAY.nl
 
-### Logs bekijken:
+1. Ga naar **PAY.nl → Services → [jouw service] → Webhooks**
+2. Voeg een nieuwe webhook toe:
+   - **URL:** `https://jouwsite.nl/?wc-api=pay_subs_webhook`
+   - **Events:** Transaction status changes, Mandate changes, Refunds
+   - **Secret:** kopieer de gegenereerde secret uit WooCommerce
 
-1. Schakel "Debug Logging" in bij de gateway settings
-2. Logs zijn te vinden in: WooCommerce → Status → Logs
-3. Zoek naar logs met source `pay_subscriptions`
+---
 
-### Veelvoorkomende problemen:
+## Testen
 
-#### "Betaling mislukt" error:
-- Check of API credentials correct zijn
-- Verifieer dat de service actief is in PAY.nl
-- Controleer de logs voor specifieke API errors
+Schakel testmodus in en gebruik de PAY.nl sandbox credentials. Doorloop de volgende stappen:
 
-#### Webhook werkt niet:
-- Verifieer webhook URL in PAY.nl dashboard
-- Check of webhook secret overeenkomt
-- Test met PAY.nl webhook tester
-- Controleer server logs voor 401/500 errors
+1. Maak een testproduct met een abonnement aan
+2. Plaats een bestelling in testmodus
+3. Volg de redirect naar PAY.nl en rond de testbetaling af
+4. Controleer of de orderstatus bijgewerkt is naar `processing` of `complete`
+5. Test webhook events via de PAY.nl webhook tester
+6. Forceer een abonnementsverlenging via WooCommerce en controleer of het mandaat wordt gebruikt
 
-#### Subscription renewal faalt:
-- Check of mandate correct is opgeslagen
-- Verifieer dat klant een actief mandate heeft
-- Controleer of Direct Debit is geactiveerd voor je service
+Logs zijn te vinden via **WooCommerce → Status → Logs** (filter op `pay_subscriptions`). Schakel debug logging in bij de gateway-instellingen voor uitgebreide output.
 
-### Test flow:
+---
 
-1. **Eerste betaling testen:**
-   ```
-   - Maak test product met subscription
-   - Plaats bestelling in testmodus
-   - Gebruik PAY.nl test credentials
-   - Volg redirect naar PAY.nl
-   - Complete test betaling
-   - Check of order status updated naar "processing/complete"
-   ```
+## Veelvoorkomende problemen
 
-2. **Webhook testen:**
-   ```
-   - Gebruik PAY.nl webhook tester
-   - Stuur test event naar je webhook URL
-   - Check WooCommerce logs
-   - Verifieer order status update
-   ```
+**Betaling mislukt**
+Controleer of de API credentials correct zijn en of de service actief is in PAY.nl. Bekijk de logs voor specifieke API-foutmeldingen.
 
-3. **Recurring payment testen:**
-   ```
-   - Forceer subscription renewal via WooCommerce
-   - Check logs voor mandate gebruik
-   - Verifieer dat renewal order wordt aangemaakt
-   ```
+**Webhook werkt niet**
+Verifieer de webhook URL en secret in het PAY.nl dashboard. Test via de PAY.nl webhook tester en controleer of de server geen 401 of 500 teruggeeft.
 
-## Technische details
+**Abonnementsverlenging faalt**
+Controleer of het mandaat correct is opgeslagen als WooCommerce Payment Token en of Direct Debit is ingeschakeld voor de service.
 
-### Ondersteunde features:
-- WooCommerce Subscriptions
-- Automatische incasso via mandates
-- Payment method updates
-- Refunds
-- Multiple subscriptions per klant
-- Subscription suspension/reactivation
-- Webhook verificatie met HMAC-SHA256
+---
 
-### API Endpoints gebruikt:
-- `POST /v2/transactions/start` - Nieuwe transacties
-- `GET /v2/transactions/{id}` - Status opvragen
-- `POST /v2/transactions/{id}/refund` - Terugbetalingen
-- `POST /v2/mandates/create` - Mandate aanmaken
-- `POST /v2/mandates/{id}/cancel` - Mandate annuleren
+## Bijdragen
 
-### Database:
-- Mandates worden opgeslagen als WooCommerce Payment Tokens
-- Transaction IDs worden gekoppeld aan orders
-- Webhook events worden gelogd
+Verbeteringen, bugfixes en pull requests zijn welkom. Houd rekening met het volgende:
 
-## Support
+- De plugin is primair gebouwd voor de eigen setup van 072DESIGN en kan afwijken van jouw configuratie
+- Er is geen garantie op ondersteuning of updates
+- **Gebruik op eigen risico** — test altijd grondig in een testomgeving voordat je dit in productie zet
 
-Voor problemen of vragen:
-1. Check eerst de logs in WooCommerce
-2. Verifieer PAY.nl dashboard voor transaction details
-3. Test met debug mode aan voor uitgebreide logging
+---
 
 ## Changelog
 
-### Version 0.2.0 (Fixed)
-- Complete rewrite van gateway class
-- Implementatie PAY.nl REST API v2
-- Verbeterde webhook handler
-- Fix voor namespace problemen
-- Uitgebreide error handling
-- Betere mandate/token opslag
-- Support voor subscription updates
+### v1.6.0
+- Stabiele productieversie
+- Volledige namespace implementatie (`PAY_Subscriptions`)
+- PAY.nl REST API v1 (connect.payments.nl)
+- HMAC-SHA256 webhook verificatie
+- Mandate opslag als WooCommerce Payment Tokens
+- Uitgebreide logging en foutafhandeling
 
-### Version 0.1.0 (Original)
-- Initial release
+---
 
 ## Licentie
 
-GPL v2 or later
+GPLv2 or later — zie [LICENSE](https://www.gnu.org/licenses/gpl-2.0.html)
+
+---
+
+Gemaakt door [Martijn Benjamin](https://martijnbenjamin.nl) · [072DESIGN](https://072design.nl) · Noord-Holland
