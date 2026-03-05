@@ -112,6 +112,12 @@ Verbeteringen, bugfixes en pull requests zijn welkom. Houd rekening met het volg
 
 ## Changelog
 
+### v1.7.0
+- Abonnementsverlenging werkt nu met iDEAL als initiële betaalmethode
+- IBAN-opslag vanuit initiële iDEAL-betaling voor SEPA Direct Debit
+- Meervoudige renewal-methode: payment token → SEPA-mandaat → orderreferentie
+- API-fallback wanneer webhook-data onvolledig is
+
 ### v1.6.0
 - Stabiele productieversie
 - Volledige namespace implementatie (`PAY_Subscriptions`)
