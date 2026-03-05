@@ -3,7 +3,7 @@
  * Plugin Name: PAY Subscriptions Gateway – 072DESIGN
  * Plugin URI: https://072design.nl/
  * Description: WooCommerce-gateway voor PAY met automatische incasso en webhook-integratie voor abonnementen. Ontwikkeld door 072DESIGN.
- * Version: 1.6.0
+ * Version: 1.7.0
  * Author: 072DESIGN
  * Author URI: https://072design.nl/
  * Requires at least: 5.6
@@ -17,7 +17,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'PAY_SUBS_VERSION', '1.6.0' );
+define( 'PAY_SUBS_VERSION', '1.7.0' );
 define( 'PAY_SUBS_PLUGIN_FILE', __FILE__ );
 define( 'PAY_SUBS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PAY_SUBS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

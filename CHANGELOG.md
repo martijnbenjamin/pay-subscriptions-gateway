@@ -1,5 +1,25 @@
 # Changelog - PAY Subscriptions Gateway
 
+## [1.7.0] - 2026-03-05
+
+### Fixed
+- **Subscription renewal payments** now work with iDEAL initial payments
+- Renewal handler tries multiple methods: payment tokens, SEPA mandate, order reference
+
+### Added
+- IBAN capture from initial iDEAL payment webhook (`customerMethod.data.iban`)
+- API fallback: fetches full order details when webhook data is incomplete
+- SEPA Direct Debit mandate creation for recurring payments (`POST /v1/directdebits/mandates`)
+- Direct debit charge against existing mandates (`POST /v1/directdebits`)
+- Subscription meta storage for IBAN, mandate ID, and initial Pay.nl order ID
+- Multi-method renewal: tries token → SEPA mandate → order reference fallback
+
+### Technical
+- Webhook handler now calls `get_transaction_status()` API when `customerId` is empty
+- IBAN data stored in both order and subscription meta for redundancy
+- `scheduled_subscription_payment()` rewritten with 3 fallback methods
+- `charge_with_token()` routes to `create_direct_debit()` for mandate IDs (IO- prefix)
+
 ## [1.6.0] - 2026-02-01
 
 ### Fixed

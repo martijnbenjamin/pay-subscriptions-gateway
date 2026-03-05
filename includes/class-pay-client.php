@@ -227,22 +227,154 @@ class Pay_Client {
     }
 
     /**
-     * Charge using previously stored token (recurring_id)
-     * Used for recurring subscription payments (MIT - Merchant Initiated Transaction)
+     * Create a SEPA Direct Debit mandate
+     * Used to set up recurring payments after an initial iDEAL payment
      *
-     * @param array $args Charge arguments including recurring_id/token
+     * @param array $args Mandate arguments including IBAN, amount, description
+     * @return array Response with mandate ID
+     */
+    public function create_mandate( array $args ) : array {
+        try {
+            $mandate_data = [
+                'serviceId' => $this->service_id,
+                'amount' => (int) $args['amount'],
+                'currency' => 'EUR',
+                'description' => substr($args['description'] ?? 'Incassomachtiging', 0, 128),
+                'bankaccountHolder' => $args['account_holder'] ?? '',
+                'bankaccountNumber' => $args['iban'] ?? '',
+                'bankaccountBic' => $args['bic'] ?? '',
+                'email' => $args['email'] ?? '',
+                'processDate' => $args['process_date'] ?? date('Y-m-d'),
+                'type' => 'recurring',  // recurring mandate
+            ];
+
+            // Interval voor recurring (bijv. maandelijks)
+            if (!empty($args['interval_value']) && !empty($args['interval_period'])) {
+                $mandate_data['intervalValue'] = (int) $args['interval_value'];
+                $mandate_data['intervalPeriod'] = $args['interval_period']; // month, week, trimester, year
+                $mandate_data['intervalQuantity'] = (int) ($args['interval_quantity'] ?? 0); // 0 = onbeperkt
+            }
+
+            // Exchange URL voor status updates
+            if (!empty($args['webhook_url'])) {
+                $mandate_data['exchangeUrl'] = $args['webhook_url'];
+            }
+
+            $endpoint = 'v1/directdebits/mandates';
+
+            log_info('PAY create mandate request', [
+                'endpoint' => $endpoint,
+                'amount' => $args['amount'],
+                'iban' => !empty($args['iban']) ? substr($args['iban'], 0, 8) . '...' : 'none',
+            ]);
+
+            $response = $this->request($endpoint, 'POST', $mandate_data);
+
+            $mandate_id = $response['id'] ?? $response['mandateId'] ?? null;
+
+            log_info('PAY mandate created', [
+                'mandate_id' => $mandate_id,
+            ]);
+
+            return [
+                'mandate_id' => $mandate_id,
+                'response' => $response,
+            ];
+
+        } catch (\Exception $e) {
+            log_error('PAY create mandate failed', [
+                'error' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Add a direct debit transaction to an existing mandate
+     * Used for recurring subscription payments
+     *
+     * @param array $args Direct debit arguments including mandate_id, amount
+     * @return array Response with transaction status
+     */
+    public function create_direct_debit( array $args ) : array {
+        try {
+            $debit_data = [
+                'mandateId' => $args['mandate_id'],
+                'amount' => (int) $args['amount'],
+                'currency' => 'EUR',
+                'description' => substr($args['description'] ?? 'Subscription renewal', 0, 128),
+                'processDate' => $args['process_date'] ?? date('Y-m-d'),
+            ];
+
+            // Exchange URL voor status updates
+            if (!empty($args['webhook_url'])) {
+                $debit_data['exchangeUrl'] = $args['webhook_url'];
+            }
+
+            $endpoint = 'v1/directdebits';
+
+            log_info('PAY direct debit request', [
+                'endpoint' => $endpoint,
+                'mandate_id' => $args['mandate_id'],
+                'amount' => $args['amount'],
+            ]);
+
+            $response = $this->request($endpoint, 'POST', $debit_data);
+
+            $transaction_id = $response['id'] ?? null;
+            $status = $response['status'] ?? $response['state'] ?? null;
+
+            $result = [
+                'paid' => true, // Direct debit is altijd 'pending' totdat het verwerkt is
+                'transaction_id' => $transaction_id,
+                'status' => $status,
+            ];
+
+            log_info('PAY direct debit created', $result);
+
+            return $result;
+
+        } catch (\Exception $e) {
+            log_error('PAY direct debit failed', [
+                'error' => $e->getMessage(),
+                'mandate_id' => $args['mandate_id'] ?? null,
+            ]);
+
+            return [
+                'paid' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Charge using previously stored token (recurring_id) or mandate
+     * Used for recurring subscription payments
+     *
+     * @param array $args Charge arguments
      * @return array Response with payment status
      */
     public function charge_with_token( array $args ) : array {
+        // Als er een mandate_id is, gebruik SEPA Direct Debit
+        $mandate_id = $args['mandate_id'] ?? null;
+        if (!empty($mandate_id) && strpos($mandate_id, 'IO-') === 0) {
+            return $this->create_direct_debit([
+                'mandate_id' => $mandate_id,
+                'amount' => $args['amount'],
+                'description' => $args['description'] ?? 'Subscription renewal',
+                'webhook_url' => $args['webhook_url'] ?? null,
+            ]);
+        }
+
+        // Fallback: probeer token-based (voor creditcard tokenisatie)
         try {
-            // Haal de recurring_id (token) op
             $recurring_id = $args['mandate_id'] ?? $args['token'] ?? $args['recurring_id'] ?? null;
 
             if (empty($recurring_id)) {
-                throw new \Exception('No recurring_id/token provided for recurring payment');
+                throw new \Exception('No recurring_id/token/mandate_id provided for recurring payment');
             }
 
-            // v1 Order API voor recurring/token payments
+            // v1 Order API voor recurring/token payments (creditcards)
             $order_data = [
                 'serviceId' => $this->service_id,
                 'amount' => [
@@ -250,8 +382,7 @@ class Pay_Client {
                     'currency' => 'EUR'
                 ],
                 'description' => substr($args['description'] ?? 'Subscription renewal', 0, 128),
-                'reference' => substr(preg_replace('/[^a-zA-Z0-9]/', '', $args['reference']), 0, 64),
-                // MIT = Merchant Initiated Transaction (geen klant interactie nodig)
+                'reference' => substr(preg_replace('/[^a-zA-Z0-9]/', '', $args['reference'] ?? ''), 0, 64),
                 'payment' => [
                     'method' => 'token',
                     'token' => [
@@ -259,11 +390,10 @@ class Pay_Client {
                     ]
                 ],
                 'transaction' => [
-                    'type' => 'mit' // Merchant Initiated Transaction
+                    'type' => 'mit'
                 ]
             ];
 
-            // Exchange URL voor status updates
             if (!empty($args['webhook_url'])) {
                 $order_data['exchangeUrl'] = $args['webhook_url'];
             }
@@ -278,7 +408,6 @@ class Pay_Client {
 
             $response = $this->request($endpoint, 'POST', $order_data);
 
-            // Check status van de recurring payment
             $status = $response['status']['action'] ?? $response['status'] ?? null;
             $paid = in_array(strtoupper($status), ['PAID', 'AUTHORIZE', 'PENDING', 'APPROVED']);
 

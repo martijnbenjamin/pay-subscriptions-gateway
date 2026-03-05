@@ -8,7 +8,7 @@ $emergency_log = '/home/dutchvitals/logs/webhook-emergency.log';
 @file_put_contents(
     $emergency_log,
     "\n" . str_repeat('=', 80) . "\n" .
-    date('Y-m-d H:i:s') . " - WEBHOOK FILE LOADED - VERSION 1.6.0\n" .
+    date('Y-m-d H:i:s') . " - WEBHOOK FILE LOADED - VERSION 1.7.0\n" .
     str_repeat('=', 80) . "\n" .
     "REQUEST_METHOD: " . ($_SERVER['REQUEST_METHOD'] ?? 'unknown') . "\n" .
     "REQUEST_URI: " . ($_SERVER['REQUEST_URI'] ?? 'unknown') . "\n" .
@@ -196,12 +196,78 @@ class Webhook_Handler {
                                     }
                                 }
 
-                                // Check for customerId for recurring payments
+                                // Check for customerId/mandateId for recurring payments
+                                // iDEAL webhooks often have empty customerId - we need to fetch full details from API
                                 $customer_id = $data['object']['payments'][0]['customerId'] ?? null;
-                                if (!empty($customer_id)) {
+                                $mandate_id = $data['object']['mandateId'] ?? $data['object']['payments'][0]['mandateId'] ?? null;
+
+                                @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                    date('Y-m-d H:i:s') . " - Checking recurring data: customerId=" . ($customer_id ?: 'EMPTY') .
+                                    ", mandateId=" . ($mandate_id ?: 'EMPTY') . "\n", FILE_APPEND);
+
+                                // If no recurring ID found in webhook, try fetching from API
+                                if (empty($customer_id) && empty($mandate_id)) {
                                     @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
-                                        date('Y-m-d H:i:s') . " - Found customerId for recurring: " . substr($customer_id, 0, 10) . "...\n", FILE_APPEND);
-                                    self::save_recurring_token($order, $customer_id, $data['object']);
+                                        date('Y-m-d H:i:s') . " - No recurring ID in webhook, fetching full order from API...\n", FILE_APPEND);
+
+                                    try {
+                                        $full_details = $client->get_transaction_status($order_id);
+                                        $customer_id = $full_details['recurring_id'] ?? $full_details['customer_id'] ?? null;
+                                        $mandate_id = $full_details['transaction']['mandateId'] ??
+                                                     $full_details['transaction']['recurring']['mandateId'] ?? null;
+
+                                        @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                            date('Y-m-d H:i:s') . " - API response: customerId=" . ($customer_id ?: 'EMPTY') .
+                                            ", mandateId=" . ($mandate_id ?: 'EMPTY') . "\n" .
+                                            "Full response keys: " . implode(', ', array_keys($full_details['transaction'] ?? [])) . "\n", FILE_APPEND);
+
+                                        // Also try to extract IBAN from customerMethod for mandate creation
+                                        $customer_method = $full_details['transaction']['payments'][0]['customerMethod'] ??
+                                                          $data['object']['payments'][0]['customerMethod'] ?? null;
+
+                                        if (!empty($customer_method)) {
+                                            @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                                date('Y-m-d H:i:s') . " - customerMethod found: " . json_encode($customer_method) . "\n", FILE_APPEND);
+
+                                            // Store IBAN data for potential future mandate creation
+                                            if (!empty($customer_method['data']['iban'])) {
+                                                $order->update_meta_data('_pay_customer_iban', $customer_method['data']['iban']);
+                                                $order->update_meta_data('_pay_customer_iban_name', $customer_method['data']['name'] ?? '');
+                                                $order->update_meta_data('_pay_customer_iban_bic', $customer_method['data']['bic'] ?? '');
+                                                $order->save();
+
+                                                @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                                    date('Y-m-d H:i:s') . " - IBAN stored: " . substr($customer_method['data']['iban'], 0, 8) . "...\n", FILE_APPEND);
+                                            }
+                                        }
+                                    } catch (\Exception $e) {
+                                        @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                            date('Y-m-d H:i:s') . " - API fetch failed: " . $e->getMessage() . "\n", FILE_APPEND);
+                                    }
+                                }
+
+                                // Save whichever recurring ID we found
+                                $recurring_token = $mandate_id ?: $customer_id;
+                                if (!empty($recurring_token)) {
+                                    @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                        date('Y-m-d H:i:s') . " - Saving recurring token: " . substr($recurring_token, 0, 15) . "...\n", FILE_APPEND);
+                                    self::save_recurring_token($order, $recurring_token, $data['object']);
+                                } else {
+                                    @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                                        date('Y-m-d H:i:s') . " - WARNING: No recurring token found - renewals will use IBAN mandate\n", FILE_APPEND);
+
+                                    // Store IBAN from webhook data as fallback for mandate creation
+                                    $customer_method = $data['object']['payments'][0]['customerMethod'] ?? null;
+                                    if (!empty($customer_method['data']['iban'])) {
+                                        $order->update_meta_data('_pay_customer_iban', $customer_method['data']['iban']);
+                                        $order->update_meta_data('_pay_customer_iban_name', $customer_method['data']['name'] ?? '');
+                                        $order->update_meta_data('_pay_customer_iban_bic', $customer_method['data']['bic'] ?? '');
+                                        $order->save();
+                                    }
+
+                                    // Save the Pay.nl order ID as recurring reference
+                                    // This allows us to create a mandate later via the API
+                                    self::save_subscription_meta($order, $order_id);
                                 }
                             } else {
                                 @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
@@ -985,6 +1051,36 @@ class Webhook_Handler {
             'recurring_id' => substr($recurring_id, 0, 10) . '...',
             'token_id' => $token->get_id()
         ]);
+    }
+
+    /**
+     * Save Pay.nl order reference to subscription meta for future mandate/debit creation
+     * Used when no customerId/mandateId is available (e.g. iDEAL payments)
+     */
+    private static function save_subscription_meta($order, $pay_order_id) : void {
+        if (!function_exists('\wcs_order_contains_subscription') || !\wcs_order_contains_subscription($order)) {
+            return;
+        }
+
+        $subscriptions = \wcs_get_subscriptions_for_order($order);
+        foreach ($subscriptions as $subscription) {
+            $subscription->update_meta_data('_pay_initial_order_id', $pay_order_id);
+
+            // Copy IBAN data to subscription
+            $iban = $order->get_meta('_pay_customer_iban');
+            if (!empty($iban)) {
+                $subscription->update_meta_data('_pay_customer_iban', $iban);
+                $subscription->update_meta_data('_pay_customer_iban_name', $order->get_meta('_pay_customer_iban_name'));
+                $subscription->update_meta_data('_pay_customer_iban_bic', $order->get_meta('_pay_customer_iban_bic'));
+            }
+
+            $subscription->save();
+
+            @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                date('Y-m-d H:i:s') . " - Subscription #{$subscription->get_id()} meta saved: " .
+                "pay_order_id={$pay_order_id}, iban=" . (!empty($iban) ? substr($iban, 0, 8) . '...' : 'none') . "\n",
+                FILE_APPEND);
+        }
     }
 
     /**
