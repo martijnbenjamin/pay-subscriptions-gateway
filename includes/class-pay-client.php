@@ -164,7 +164,7 @@ class Pay_Client {
             // This is the KEY part that enables token generation!
             if (!empty($args['create_mandate'])) {
                 $order_data['order'] = [
-                    'recurring' => 1,  // Enable recurring/mandate creation
+                    'recurring' => true,  // Enable recurring/mandate creation (must be boolean)
                 ];
 
                 // Add transfer data for mandate description (shown to customer)
@@ -348,25 +348,18 @@ class Pay_Client {
     }
 
     /**
-     * Charge using previously stored token (recurring_id) or mandate
-     * Used for recurring subscription payments
+     * Charge using previously stored token (recurring_id/customerId) or mandate
+     * Used for recurring subscription payments via Pay.nl v1 API
+     *
+     * Pay.nl v1 API recurring flow:
+     * - Initial iDEAL payment with recurring=true creates a customer profile
+     * - The customerId from the payment response is used for subsequent charges
+     * - Recurring charges are created as MIT (Merchant Initiated Transactions)
      *
      * @param array $args Charge arguments
      * @return array Response with payment status
      */
     public function charge_with_token( array $args ) : array {
-        // Als er een mandate_id is, gebruik SEPA Direct Debit
-        $mandate_id = $args['mandate_id'] ?? null;
-        if (!empty($mandate_id) && strpos($mandate_id, 'IO-') === 0) {
-            return $this->create_direct_debit([
-                'mandate_id' => $mandate_id,
-                'amount' => $args['amount'],
-                'description' => $args['description'] ?? 'Subscription renewal',
-                'webhook_url' => $args['webhook_url'] ?? null,
-            ]);
-        }
-
-        // Fallback: probeer token-based (voor creditcard tokenisatie)
         try {
             $recurring_id = $args['mandate_id'] ?? $args['token'] ?? $args['recurring_id'] ?? null;
 
@@ -374,7 +367,14 @@ class Pay_Client {
                 throw new \Exception('No recurring_id/token/mandate_id provided for recurring payment');
             }
 
-            // v1 Order API voor recurring/token payments (creditcards)
+            log_info('PAY charge_with_token called', [
+                'recurring_id' => substr($recurring_id, 0, 15) . '...',
+                'amount' => $args['amount'],
+                'recurring_id_full_length' => strlen($recurring_id),
+            ]);
+
+            // Pay.nl v1 Order API for recurring/MIT payments
+            // The customerId obtained from the initial payment is used to charge again
             $order_data = [
                 'serviceId' => $this->service_id,
                 'amount' => [
@@ -383,15 +383,16 @@ class Pay_Client {
                 ],
                 'description' => substr($args['description'] ?? 'Subscription renewal', 0, 128),
                 'reference' => substr(preg_replace('/[^a-zA-Z0-9]/', '', $args['reference'] ?? ''), 0, 64),
-                'payment' => [
-                    'method' => 'token',
-                    'token' => [
-                        'id' => $recurring_id
-                    ]
+                'integration' => [
+                    'test' => $this->testmode,
                 ],
-                'transaction' => [
-                    'type' => 'mit'
-                ]
+                'customer' => [
+                    'reference' => $recurring_id,
+                ],
+                'order' => [
+                    'recurring' => true,
+                    'merchantInitiated' => true,
+                ],
             ];
 
             if (!empty($args['webhook_url'])) {
@@ -402,14 +403,15 @@ class Pay_Client {
 
             log_info('PAY recurring payment request', [
                 'endpoint' => $endpoint,
-                'recurring_id' => substr($recurring_id, 0, 10) . '...',
-                'amount' => $args['amount']
+                'recurring_id' => substr($recurring_id, 0, 15) . '...',
+                'amount' => $args['amount'],
+                'order_data_keys' => array_keys($order_data),
             ]);
 
             $response = $this->request($endpoint, 'POST', $order_data);
 
             $status = $response['status']['action'] ?? $response['status'] ?? null;
-            $paid = in_array(strtoupper($status), ['PAID', 'AUTHORIZE', 'PENDING', 'APPROVED']);
+            $paid = in_array(strtoupper($status ?? ''), ['PAID', 'AUTHORIZE', 'PENDING', 'APPROVED']);
 
             $result = [
                 'paid' => $paid,
@@ -424,7 +426,7 @@ class Pay_Client {
         } catch (\Exception $e) {
             log_error('PAY charge_with_token failed', [
                 'error' => $e->getMessage(),
-                'recurring_id' => isset($recurring_id) ? substr($recurring_id, 0, 10) . '...' : null
+                'recurring_id' => isset($recurring_id) ? substr($recurring_id, 0, 15) . '...' : null
             ]);
 
             return [
@@ -449,19 +451,49 @@ class Pay_Client {
             $status = $response['status']['action'] ?? $response['status'] ?? null;
 
             // Extract recurring/mandate ID from response
-            // Pay.nl kan dit op verschillende plekken terugsturen
-            $recurring_id = $response['payments'][0]['customerId'] ??
-                           $response['customerId'] ??
-                           $response['recurring']['mandateId'] ??
-                           $response['paymentDetails']['recurring_id'] ??
-                           null;
+            // Pay.nl kan dit op VEEL verschillende plekken terugsturen afhankelijk van API versie
+            $recurring_id = null;
+            $check_locations = [
+                'payments.0.customerId',
+                'payments.0.paymentMethod.customerId',
+                'payments.0.token.id',
+                'payments.0.token.code',
+                'customerId',
+                'customer.reference',
+                'customer.id',
+                'recurring.mandateId',
+                'recurring.customerId',
+                'paymentDetails.recurring_id',
+                'paymentDetails.customerId',
+            ];
 
-            log_debug('PAY get_transaction_status response', [
+            foreach ($check_locations as $path) {
+                $parts = explode('.', $path);
+                $value = $response;
+                foreach ($parts as $part) {
+                    if (is_array($value) && isset($value[$part])) {
+                        $value = $value[$part];
+                    } else {
+                        $value = null;
+                        break;
+                    }
+                }
+                if (!empty($value) && is_string($value)) {
+                    $recurring_id = $value;
+                    log_debug('PAY recurring_id found at: ' . $path, [
+                        'recurring_id' => substr($recurring_id, 0, 15) . '...',
+                    ]);
+                    break;
+                }
+            }
+
+            log_info('PAY get_transaction_status response', [
                 'order_id' => $order_id,
                 'status' => $status,
-                'recurring_id' => $recurring_id ? substr($recurring_id, 0, 10) . '...' : null,
+                'recurring_id' => $recurring_id ? substr($recurring_id, 0, 15) . '...' : 'NOT FOUND',
                 'has_payments' => !empty($response['payments']),
-                'response_keys' => array_keys($response)
+                'response_keys' => array_keys($response),
+                'payments_keys' => !empty($response['payments'][0]) ? array_keys($response['payments'][0]) : [],
             ]);
 
             return [

@@ -508,12 +508,22 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
      * 3. Pay.nl order reference for repeat charges
      */
     public function scheduled_subscription_payment($amount_to_charge, $renewal_order) {
-        try {
-            log_info('Processing scheduled subscription payment', [
-                'order_id' => $renewal_order->get_id(),
-                'amount' => $amount_to_charge
-            ]);
+        // ALTIJD loggen bij renewal - dit is het kritieke pad
+        log_info('=== RENEWAL PAYMENT START ===', [
+            'renewal_order_id' => $renewal_order->get_id(),
+            'amount' => $amount_to_charge,
+            'order_status' => $renewal_order->get_status(),
+        ]);
 
+        // Ook emergency loggen zodat we ZEKER weten dat dit wordt aangeroepen
+        @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+            "\n" . str_repeat('=', 60) . "\n" .
+            date('Y-m-d H:i:s') . " - RENEWAL PAYMENT TRIGGERED\n" .
+            "Renewal order: " . $renewal_order->get_id() . "\n" .
+            "Amount: " . $amount_to_charge . "\n" .
+            str_repeat('=', 60) . "\n", FILE_APPEND);
+
+        try {
             // Find the subscription
             $subscription = null;
             $subscription_id = $renewal_order->get_meta('_subscription_renewal');
@@ -522,7 +532,6 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
             }
 
             if (!$subscription) {
-                // Try alternative method to find subscription
                 $subscriptions = \wcs_get_subscriptions_for_renewal_order($renewal_order);
                 if (!empty($subscriptions)) {
                     $subscription = reset($subscriptions);
@@ -530,56 +539,93 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
             }
 
             if (!$subscription) {
-                throw new \Exception(__('Abonnement niet gevonden.', 'pay-subs'));
+                throw new \Exception(__('Abonnement niet gevonden voor renewal order.', 'pay-subs'));
             }
 
-            log_info('Found subscription for renewal', [
+            // Log ALLE beschikbare recurring data op het abonnement
+            $tokens = $subscription->get_payment_tokens();
+            $iban = $subscription->get_meta('_pay_customer_iban');
+            $initial_pay_order = $subscription->get_meta('_pay_initial_order_id');
+            $mandate_id = $subscription->get_meta('_pay_mandate_id');
+
+            log_info('Subscription renewal data inventory', [
                 'subscription_id' => $subscription->get_id(),
-                'renewal_order_id' => $renewal_order->get_id()
+                'subscription_status' => $subscription->get_status(),
+                'payment_tokens_count' => count($tokens),
+                'payment_token_ids' => $tokens,
+                'has_iban' => !empty($iban),
+                'has_initial_pay_order' => !empty($initial_pay_order),
+                'has_mandate_id' => !empty($mandate_id),
+                'initial_pay_order' => $initial_pay_order ?: 'none',
             ]);
+
+            @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                date('Y-m-d H:i:s') . " - Subscription #{$subscription->get_id()}: " .
+                "tokens=" . count($tokens) . ", iban=" . (!empty($iban) ? 'YES' : 'NO') .
+                ", initial_order=" . ($initial_pay_order ?: 'none') .
+                ", mandate=" . ($mandate_id ?: 'none') . "\n", FILE_APPEND);
 
             $client = new Pay_Client($this->token_code, $this->api_token, $this->service_id, $this->testmode);
 
-            // Method 1: Try payment tokens (customerId/mandateId)
-            $tokens = $subscription->get_payment_tokens();
+            // ---------------------------------------------------------------
+            // Method 1: Payment tokens (customerId van Pay.nl)
+            // ---------------------------------------------------------------
             if (!empty($tokens)) {
-                $token_id = reset($tokens);
-                $token = \WC_Payment_Tokens::get($token_id);
+                foreach ($tokens as $token_id) {
+                    $token = \WC_Payment_Tokens::get($token_id);
 
-                if ($token) {
-                    $recurring_id = $token->get_meta('mandate_id') ?: $token->get_token();
+                    if (!$token) {
+                        log_warning('Token not found', ['token_id' => $token_id]);
+                        continue;
+                    }
+
+                    // Probeer mandate_id, recurring_id, of de token value zelf
+                    $recurring_id = $token->get_meta('mandate_id')
+                        ?: $token->get_meta('recurring_id')
+                        ?: $token->get_token();
 
                     log_info('Attempting renewal with payment token', [
                         'token_id' => $token_id,
                         'recurring_id' => substr($recurring_id, 0, 15) . '...',
+                        'token_meta' => [
+                            'mandate_id' => $token->get_meta('mandate_id') ?: 'none',
+                            'recurring_id' => $token->get_meta('recurring_id') ?: 'none',
+                            'customer_id' => $token->get_meta('customer_id') ?: 'none',
+                        ],
                     ]);
 
                     $result = $client->charge_with_token([
                         'amount' => cents($amount_to_charge),
                         'description' => sprintf('Abonnement verlenging order %s', $renewal_order->get_order_number()),
                         'reference' => (string) $renewal_order->get_id(),
-                        'mandate_id' => $recurring_id,
-                        'token' => $recurring_id,
+                        'recurring_id' => $recurring_id,
                         'webhook_url' => get_webhook_url(),
                     ]);
 
                     if ($result['paid']) {
                         $renewal_order->payment_complete($result['transaction_id'] ?? '');
-                        log_info('Subscription payment successful via token', [
+                        log_info('=== RENEWAL SUCCESS via token ===', [
                             'order_id' => $renewal_order->get_id(),
                             'transaction_id' => $result['transaction_id'] ?? null
                         ]);
+                        @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                            date('Y-m-d H:i:s') . " - RENEWAL SUCCESS via token for order " . $renewal_order->get_id() . "\n", FILE_APPEND);
                         return;
                     }
 
-                    log_warning('Token-based renewal failed, trying alternative methods', [
-                        'error' => $result['error'] ?? 'unknown'
+                    log_warning('Token-based renewal failed', [
+                        'token_id' => $token_id,
+                        'error' => $result['error'] ?? 'unknown',
+                        'status' => $result['status'] ?? 'unknown',
                     ]);
                 }
+            } else {
+                log_warning('No payment tokens found on subscription');
             }
 
-            // Method 2: Try SEPA Direct Debit with stored IBAN
-            $iban = $subscription->get_meta('_pay_customer_iban');
+            // ---------------------------------------------------------------
+            // Method 2: SEPA Direct Debit met opgeslagen IBAN
+            // ---------------------------------------------------------------
             if (!empty($iban)) {
                 $iban_name = $subscription->get_meta('_pay_customer_iban_name') ?: $renewal_order->get_billing_first_name() . ' ' . $renewal_order->get_billing_last_name();
                 $iban_bic = $subscription->get_meta('_pay_customer_iban_bic') ?: '';
@@ -587,13 +633,10 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
                 log_info('Attempting renewal via SEPA mandate with IBAN', [
                     'iban' => substr($iban, 0, 8) . '...',
                     'name' => $iban_name,
+                    'existing_mandate' => $mandate_id ?: 'none',
                 ]);
 
-                // First check if we already have a mandate
-                $mandate_id = $subscription->get_meta('_pay_mandate_id');
-
                 if (empty($mandate_id)) {
-                    // Create a new mandate
                     log_info('Creating new SEPA mandate for subscription');
 
                     try {
@@ -614,11 +657,7 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
                         if (!empty($mandate_id)) {
                             $subscription->update_meta_data('_pay_mandate_id', $mandate_id);
                             $subscription->save();
-
-                            log_info('SEPA mandate created', [
-                                'mandate_id' => $mandate_id,
-                                'subscription_id' => $subscription->get_id()
-                            ]);
+                            log_info('SEPA mandate created', ['mandate_id' => $mandate_id]);
                         }
                     } catch (\Exception $e) {
                         log_error('Mandate creation failed', ['error' => $e->getMessage()]);
@@ -626,7 +665,6 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
                 }
 
                 if (!empty($mandate_id)) {
-                    // Create direct debit charge against the mandate
                     $result = $client->create_direct_debit([
                         'mandate_id' => $mandate_id,
                         'amount' => cents($amount_to_charge),
@@ -636,22 +674,24 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
 
                     if ($result['paid']) {
                         $renewal_order->payment_complete($result['transaction_id'] ?? '');
-                        log_info('Subscription payment successful via SEPA mandate', [
+                        log_info('=== RENEWAL SUCCESS via SEPA mandate ===', [
                             'order_id' => $renewal_order->get_id(),
                             'mandate_id' => $mandate_id,
-                            'transaction_id' => $result['transaction_id'] ?? null
                         ]);
                         return;
                     }
 
                     log_warning('SEPA mandate charge failed', ['error' => $result['error'] ?? 'unknown']);
                 }
+            } else {
+                log_info('No IBAN stored on subscription, skipping SEPA method');
             }
 
-            // Method 3: Try creating a new order via Pay.nl API (merchant-initiated)
-            $initial_pay_order = $subscription->get_meta('_pay_initial_order_id');
+            // ---------------------------------------------------------------
+            // Method 3: Pay.nl order reference (merchant-initiated)
+            // ---------------------------------------------------------------
             if (!empty($initial_pay_order)) {
-                log_info('Attempting renewal via new Pay.nl order (merchant-initiated)', [
+                log_info('Attempting renewal via Pay.nl order reference', [
                     'initial_order' => $initial_pay_order
                 ]);
 
@@ -660,32 +700,46 @@ class WC_Gateway_PAY extends \WC_Payment_Gateway {
                         'amount' => cents($amount_to_charge),
                         'description' => sprintf('Abonnement verlenging order %s', $renewal_order->get_order_number()),
                         'reference' => (string) $renewal_order->get_id(),
-                        'mandate_id' => $initial_pay_order,
-                        'token' => $initial_pay_order,
+                        'recurring_id' => $initial_pay_order,
                         'webhook_url' => get_webhook_url(),
                     ]);
 
                     if ($result['paid']) {
                         $renewal_order->payment_complete($result['transaction_id'] ?? '');
-                        log_info('Subscription payment successful via order reference', [
+                        log_info('=== RENEWAL SUCCESS via order reference ===', [
                             'order_id' => $renewal_order->get_id(),
-                            'transaction_id' => $result['transaction_id'] ?? null
                         ]);
                         return;
                     }
+
+                    log_warning('Order reference renewal failed', [
+                        'error' => $result['error'] ?? 'unknown',
+                        'status' => $result['status'] ?? 'unknown',
+                    ]);
                 } catch (\Exception $e) {
-                    log_error('Order reference renewal failed', ['error' => $e->getMessage()]);
+                    log_error('Order reference renewal exception', ['error' => $e->getMessage()]);
                 }
+            } else {
+                log_info('No initial Pay.nl order ID stored, skipping order reference method');
             }
 
-            // No method worked
-            throw new \Exception(__('Geen werkende betaalmethode gevonden voor abonnement. Controleer of automatische incasso is ingeschakeld bij Pay.nl.', 'pay-subs'));
+            // Geen methode werkte
+            throw new \Exception(__(
+                'Geen werkende betaalmethode gevonden voor abonnement verlenging. ' .
+                'Tokens: ' . count($tokens) . ', IBAN: ' . (!empty($iban) ? 'ja' : 'nee') .
+                ', Initial order: ' . ($initial_pay_order ?: 'geen') .
+                '. Controleer of recurring/automatische incasso is ingeschakeld bij Pay.nl.',
+                'pay-subs'
+            ));
 
         } catch (\Exception $e) {
-            log_error('Subscription payment failed', [
+            log_error('=== RENEWAL FAILED ===', [
                 'order_id' => $renewal_order->get_id(),
                 'error' => $e->getMessage()
             ]);
+
+            @file_put_contents('/home/dutchvitals/logs/webhook-emergency.log',
+                date('Y-m-d H:i:s') . " - RENEWAL FAILED: " . $e->getMessage() . "\n", FILE_APPEND);
 
             $renewal_order->update_status('failed', sprintf(
                 __('Automatische betaling mislukt: %s', 'pay-subs'),
